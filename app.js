@@ -2,7 +2,6 @@ let port = null;
 let reader = null;
 let serialRunning = false;
 let pointerEvents = [];
-let marks = [];
 let serialLines = [];
 let serialLineBuffer = "";
 let lastPointerT = null;
@@ -203,12 +202,6 @@ function stopPointerLock() {
   if (document.pointerLockElement) document.exitPointerLock();
 }
 
-function markTime() {
-  const t = nowMs();
-  marks.push(t);
-  appendPointerLine(`${t.toFixed(3)} mark`);
-}
-
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, c => ({
     "&": "&amp;",
@@ -237,6 +230,29 @@ function normalizeTime(serialEvents, pointerEvents) {
     offset,
     note: `first non-zero HID基準で offset=${offset.toFixed(3)}ms`
   };
+}
+
+function alignRawEvents(serialEvents, offset) {
+  return serialEvents
+    .filter(e => e.type === "raw" && (e.x !== 0 || e.y !== 0))
+    .map(e => ({...e, at: e.t + offset}));
+}
+
+function classifyRawDrift(rawAligned, pairs, windowMs) {
+  const maxDt = Math.min(Math.max(windowMs, 10), 80);
+  return rawAligned.map(raw => {
+    let nearest = null;
+    for (const pair of pairs) {
+      const dt = Math.abs(pair.h.at - raw.at);
+      if (!nearest || dt < nearest.dt) nearest = { pair, dt };
+    }
+    const pair = nearest && nearest.dt <= maxDt ? nearest.pair : null;
+    return {
+      ...raw,
+      verdict: pair ? pair.verdict : "missing",
+      pairDt: pair ? nearest.dt : null
+    };
+  });
 }
 
 function nearestBrowserSum(pointerEvents, centerT, windowMs) {
@@ -275,22 +291,25 @@ function analyze() {
     else if (browserZero) verdict = "missing";
     return { h, b, expectedX, expectedY, zmkTiny, verdict };
   });
+  const rawDrift = classifyRawDrift(alignRawEvents(serialEvents, offset), pairs, windowMs);
 
-  renderSummary(serialEvents, hidAligned, pointerAligned, pairs, note);
+  renderSummary(serialEvents, hidAligned, pointerAligned, rawDrift, pairs, note);
   renderDirectionStats(serialEvents, hidAligned, pairs);
   renderPairs(pairs);
-  drawChart(hidAligned, pointerAligned, pairs, windowMs);
-  renderRecommendation(pairs, jitter, windowMs, offset);
-  lastAnalysis = buildAnalysisExport(serialEvents, hidAligned, pointerAligned, pairs, jitter, windowMs, offset, note);
+  drawChart(hidAligned, pointerAligned, rawDrift, pairs, windowMs);
+  lastAnalysis = buildAnalysisExport(serialEvents, hidAligned, pointerAligned, rawDrift, pairs, jitter, windowMs, offset, note);
 }
 
-function renderSummary(serialEvents, hid, pointer, pairs, note) {
+function renderSummary(serialEvents, hid, pointer, rawDrift, pairs, note) {
   const raw = serialEvents.filter(e => e.type === "raw");
   const scale = serialEvents.filter(e => e.type === "scale");
   const hidNonZero = hid.filter(e => e.x !== 0 || e.y !== 0);
   const suppressed = pairs.filter(p => p.verdict === "suppressed");
   const visible = pairs.filter(p => p.verdict === "visible");
   const missing = pairs.filter(p => p.verdict === "missing");
+  const rawSuppressed = rawDrift.filter(e => e.verdict === "suppressed");
+  const rawVisible = rawDrift.filter(e => e.verdict === "visible");
+  const rawMissing = rawDrift.filter(e => e.verdict === "missing");
   const measured = suppressed.length + visible.length;
   const suppressionRate = measured ? suppressed.length / measured : 0;
   const residualRate = measured ? visible.length / measured : 0;
@@ -305,6 +324,7 @@ function renderSummary(serialEvents, hid, pointer, pairs, note) {
     <div class="card"><div class="label">推定低減</div><div class="num ${suppressionRate >= 0.8 ? "okText" : suppressionRate >= 0.5 ? "warnText" : "dangerText"}">${formatPct(suppressionRate)}</div></div>
     <div class="card"><div class="label">可視HID量 / 全HID量</div><div class="num ${visibleAbsRate <= 0.1 ? "okText" : visibleAbsRate <= 0.3 ? "warnText" : "dangerText"}">${formatPct(visibleAbsRate)}</div></div>
     <div class="card"><div class="label">抑制 / 可視 / 不明</div><div class="num">${suppressed.length} / ${visible.length} / ${missing.length}</div></div>
+    <div class="card"><div class="label">raw抑制 / 可視 / 不明</div><div class="num">${rawSuppressed.length} / ${rawVisible.length} / ${rawMissing.length}</div></div>
     <div class="card"><div class="label">LPPS raw / scale</div><div class="num">${raw.length} / ${scale.length}</div></div>
     <div class="card"><div class="label">Browser move</div><div class="num">${pointer.length}</div></div>
   `;
@@ -434,14 +454,14 @@ function renderPairs(pairs) {
   }
 }
 
-function drawChart(hid, pointer, pairs, windowMs) {
+function drawChart(hid, pointer, rawDrift, pairs, windowMs) {
   const canvas = document.getElementById("chart");
   const ctx = canvas.getContext("2d");
   const w = canvas.width, h = canvas.height;
   ctx.clearRect(0,0,w,h);
   ctx.fillStyle = "#fff"; ctx.fillRect(0,0,w,h);
 
-  const all = [...hid, ...pointer];
+  const all = [...hid, ...pointer, ...rawDrift];
   if (all.length === 0) {
     ctx.fillStyle = "#6b7280";
     ctx.font = "18px system-ui";
@@ -452,7 +472,12 @@ function drawChart(hid, pointer, pairs, windowMs) {
   const t0 = Math.min(...all.map(e => e.at ?? e.t));
   const t1 = Math.max(...all.map(e => e.at ?? e.t));
   const span = Math.max(1, t1 - t0);
-  const maxAbs = Math.max(1, ...hid.flatMap(e => [Math.abs(e.x), Math.abs(e.y)]), ...pointer.flatMap(e => [Math.abs(e.x), Math.abs(e.y)]));
+  const maxAbs = Math.max(
+    1,
+    ...hid.flatMap(e => [Math.abs(e.x), Math.abs(e.y)]),
+    ...pointer.flatMap(e => [Math.abs(e.x), Math.abs(e.y)]),
+    ...rawDrift.flatMap(e => [Math.abs(e.x), Math.abs(e.y)])
+  );
 
   function px(t) { return ((t - t0) / span) * (w - 50) + 25; }
   function py(v) { return h/2 - (v / maxAbs) * (h * 0.38); }
@@ -483,101 +508,51 @@ function drawChart(hid, pointer, pairs, windowMs) {
     }
   }
 
+  function rawColor(verdict) {
+    if (verdict === "suppressed") return "#dc2626";
+    if (verdict === "visible") return "#059669";
+    return "#d97706";
+  }
+
+  function drawRawDrift(data) {
+    if (!data.length) return;
+    for (const e of data) {
+      const x = px(e.at);
+      const color = rawColor(e.verdict);
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 1.5;
+
+      ctx.beginPath();
+      ctx.moveTo(x - 4, py(e.x));
+      ctx.lineTo(x + 4, py(e.x));
+      ctx.moveTo(x, py(e.x) - 4);
+      ctx.lineTo(x, py(e.x) + 4);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(x, py(e.y), 4, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
   const hidNonZero = hid.filter(e => e.x !== 0 || e.y !== 0);
   drawSeries(hidNonZero, "x", "#2563eb", 2);
   drawSeries(hidNonZero, "y", "#93c5fd", 2);
   drawSeries(pointer, "x", "#111827", 2);
   drawSeries(pointer, "y", "#6b7280", 2);
+  drawRawDrift(rawDrift);
 
   ctx.fillStyle = "#111827";
   ctx.font = "13px system-ui";
   ctx.fillText(`window=${windowMs}ms maxAbs=${maxAbs}`, 20, 22);
-  ctx.fillStyle = "#2563eb"; ctx.fillText("ZMK X", w-210, 22);
-  ctx.fillStyle = "#93c5fd"; ctx.fillText("ZMK Y", w-160, 22);
-  ctx.fillStyle = "#111827"; ctx.fillText("Browser X", w-110, 22);
-  ctx.fillStyle = "#6b7280"; ctx.fillText("Browser Y", w-38, 22);
-}
-
-function renderRecommendation(pairs, jitter, windowMs, offset) {
-  const suppressed = pairs.filter(p => p.verdict === "suppressed");
-  const visible = pairs.filter(p => p.verdict === "visible");
-  const xsSupp = suppressed.map(p => Math.abs(p.h.x));
-  const ysSupp = suppressed.map(p => Math.abs(p.h.y));
-  const maxSupp = Math.max(0, ...xsSupp, ...ysSupp);
-  const minVisible = Math.min(Infinity, ...visible.flatMap(p => [Math.abs(p.h.x), Math.abs(p.h.y)]).filter(v => v > 0));
-
-  let text = `時刻合わせ offset: ${offset.toFixed(3)} ms
-対応窓: ±${windowMs} ms
-現在のjitterしきい値: ${jitter}
-
-`;
-
-  if (suppressed.length) {
-    text += `推定:
-- ZMKが非ゼロHIDを出しているのに、ブラウザ側movementがほぼ出ていないイベントがあります。
-- OSまたはブラウザ入力層に、微小入力を無視する jitter-no-move / 低速丸め相当の処理がある可能性が高いです。
-- 今回抑制されているZMK HIDの最大absは ${maxSupp} です。
-
-`;
-  } else {
-    text += `推定:
-- このデータではOS抑制候補はまだ見えていません。
-- Pointer Lockが有効な状態で、静止ドリフトが出るまで長めに取得してください。
-- または対応窓msを 80 → 150ms くらいに広げて再解析してください。
-
-`;
-  }
-
-  if (visible.length && Number.isFinite(minVisible)) {
-    text += `可視イベント:
-- ブラウザ側でも動いたHID入力があります。
-- 可視入力の最小absは ${minVisible} 付近です。
-- しきい値は「抑制最大abs ${maxSupp}」と「可視最小abs ${minVisible}」の間に置くのが候補です。
-
-`;
-  }
-
-  const suggested = Math.max(jitter, maxSupp || jitter);
-  text += `ZMK側の実装候補:
-
-// scale / axis transform / acceleration 後、
-// zmk_hid_mouse_movement_set() の直前で実行する
-
-#define JITTER_NO_MOVE_THRESHOLD ${suggested}
-#define JITTER_SUPPRESS_MS 100
-
-bool tiny =
-    abs(report_x) <= JITTER_NO_MOVE_THRESHOLD &&
-    abs(report_y) <= JITTER_NO_MOVE_THRESHOLD;
-
-if (tiny && !button_pressed) {
-    tiny_motion_ms += elapsed_ms;
-} else {
-    tiny_motion_ms = 0;
-}
-
-// まずは継続した微小入力だけ止める
-if (tiny_motion_ms >= JITTER_SUPPRESS_MS) {
-    report_x = 0;
-    report_y = 0;
-}
-
-// 比較用に、単純版も試す価値あり
-// if (abs(report_x) <= JITTER_NO_MOVE_THRESHOLD &&
-//     abs(report_y) <= JITTER_NO_MOVE_THRESHOLD) {
-//     report_x = 0;
-//     report_y = 0;
-// }
-
-ログ追加案:
-- ZMK HID送信直前の report_x/report_y
-- suppress前後の値
-- tiny_motion_ms
-- button_pressed
-- raw/scale/HIDの方向統計。特に同一方向へ偏るか
-`;
-
-  document.getElementById("recommendation").textContent = text;
+  ctx.fillStyle = "#2563eb"; ctx.fillText("ZMK X", w-390, 22);
+  ctx.fillStyle = "#93c5fd"; ctx.fillText("ZMK Y", w-340, 22);
+  ctx.fillStyle = "#111827"; ctx.fillText("Browser X", w-290, 22);
+  ctx.fillStyle = "#6b7280"; ctx.fillText("Browser Y", w-215, 22);
+  ctx.fillStyle = "#dc2626"; ctx.fillText("raw抑制", w-135, 22);
+  ctx.fillStyle = "#059669"; ctx.fillText("raw可視", w-80, 22);
+  ctx.fillStyle = "#d97706"; ctx.fillText("raw不明", w-80, 40);
 }
 
 function compactPair(p) {
@@ -591,10 +566,23 @@ function compactPair(p) {
   };
 }
 
-function buildAnalysisExport(serialEvents, hid, pointer, pairs, jitter, windowMs, offset, note) {
+function compactRawDrift(e) {
+  return {
+    timeMs: e.at,
+    raw: { x: e.x, y: e.y, z: e.z },
+    verdict: e.verdict,
+    pairDtMs: e.pairDt,
+    logLine: e.line
+  };
+}
+
+function buildAnalysisExport(serialEvents, hid, pointer, rawDrift, pairs, jitter, windowMs, offset, note) {
   const suppressed = pairs.filter(p => p.verdict === "suppressed");
   const visible = pairs.filter(p => p.verdict === "visible");
   const missing = pairs.filter(p => p.verdict === "missing");
+  const rawSuppressed = rawDrift.filter(e => e.verdict === "suppressed");
+  const rawVisible = rawDrift.filter(e => e.verdict === "visible");
+  const rawMissing = rawDrift.filter(e => e.verdict === "missing");
   const measured = suppressed.length + visible.length;
   const hidNonZero = hid.filter(e => e.x !== 0 || e.y !== 0);
   const hidAbs = hidNonZero.reduce((sum,e) => sum + Math.abs(e.x) + Math.abs(e.y), 0);
@@ -609,13 +597,18 @@ function buildAnalysisExport(serialEvents, hid, pointer, pairs, jitter, windowMs
       browserMove: pointer.length,
       suppressed: suppressed.length,
       visible: visible.length,
-      missing: missing.length
+      missing: missing.length,
+      rawDrift: rawDrift.length,
+      rawSuppressed: rawSuppressed.length,
+      rawVisible: rawVisible.length,
+      rawMissing: rawMissing.length
     },
     metrics: {
       suppressionRate: measured ? suppressed.length / measured : null,
       visibleResidualRate: measured ? visible.length / measured : null,
       visibleHidAmountRate: hidAbs ? visibleAbs / hidAbs : null
     },
+    rawDriftEvents: rawDrift.slice(0, 300).map(compactRawDrift),
     suppressedEvents: suppressed.slice(0, 200).map(compactPair),
     visibleEvents: visible.slice(0, 200).map(compactPair),
     missingEvents: missing.slice(0, 100).map(compactPair)
@@ -650,6 +643,7 @@ const sampleSerial = `[00:04:27.822,967] lpps: lpps_motion_work_handler: Motion 
 [00:04:27.823,486] zmk: scale_val: scaled -1 with 6/5 to -2 with remainder 0
 [00:04:27.823,669] zmk: zmk_hid_mouse_movement_set: Mouse movement set to 2/0
 [00:04:27.823,730] zmk: zmk_hid_mouse_movement_set: Mouse movement set to 0/0
+[00:04:28.023,333] lpps: LPPS_SENSOR t=268023 x=1 y=0 z=0
 [00:04:28.023,669] zmk: zmk_hid_mouse_movement_set: Mouse movement set to 1/0
 [00:04:28.023,730] zmk: zmk_hid_mouse_movement_set: Mouse movement set to 0/0`;
 
@@ -658,7 +652,7 @@ function loadSample() {
   // performance.now系に寄せたサンプル。normalizeで先頭non-zeroに合う。
   document.getElementById("pointerLog").value =
 `267823.700 move 0/0
-268023.700 move 0/0
+268023.700 move 3/0
 `;
   analyze();
 }
@@ -667,18 +661,15 @@ function clearAll() {
   document.getElementById("serialLog").value = "";
   document.getElementById("pointerLog").value = "";
   pointerEvents = [];
-  marks = [];
   serialLineBuffer = "";
   analyze();
 }
 
 document.getElementById("serialConnectBtn").addEventListener("click", connectSerial);
 document.getElementById("serialDisconnectBtn").addEventListener("click", disconnectSerial);
-document.getElementById("serialFlushBtn").addEventListener("click", flushSerialLineBuffer);
 document.getElementById("pointerStartBtn").addEventListener("click", requestPointerLock);
 document.getElementById("pointerStopBtn").addEventListener("click", stopPointerLock);
 document.getElementById("captureBox").addEventListener("click", requestPointerLock);
-document.getElementById("markBtn").addEventListener("click", markTime);
 document.addEventListener("pointerlockchange", onPointerLockChange);
 document.addEventListener("mousemove", onMouseMove);
 document.getElementById("analyzeBtn").addEventListener("click", analyze);

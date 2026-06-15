@@ -34,13 +34,12 @@
 
   <section class="panel">
     <h2>1. 取得</h2>
-    <div class="cols">
-      <div>
+    <div class="capture-grid">
+      <div class="capture-pane">
         <h3>USBシリアルログ</h3>
-        <div class="controls">
+        <div class="toolbar">
           <button id="serialConnectBtn">USBシリアル接続</button>
           <button class="secondary" id="serialDisconnectBtn" disabled>切断</button>
-          <button class="ghost" id="serialFlushBtn">行バッファ吐き出し</button>
           <label>baud:
             <select id="baudRate">
               <option value="115200" selected>115200</option>
@@ -52,12 +51,11 @@
         <div id="serialStatus" class="status">状態: <strong>未接続</strong></div>
         <textarea id="serialLog" spellcheck="false" placeholder="Web Serialで取得したログがここに入ります。貼り付けでも解析できます。"></textarea>
       </div>
-      <div>
+      <div class="capture-pane">
         <h3>マウス移動イベント</h3>
-        <div class="controls">
+        <div class="toolbar">
           <button id="pointerStartBtn">Pointer Lock開始</button>
           <button class="secondary" id="pointerStopBtn">停止</button>
-          <button class="ghost" id="markBtn">時刻マーク</button>
         </div>
         <div id="captureBox" class="captureBox">
           <div>
@@ -70,23 +68,24 @@
         <textarea id="pointerLog" spellcheck="false" placeholder="ブラウザが受け取った mousemove movementX/Y がここに入ります。"></textarea>
       </div>
     </div>
-    <div class="controls">
-      <button id="analyzeBtn">比較解析する</button>
-      <button class="secondary" id="loadSampleBtn">サンプル</button>
-      <button class="ghost" id="downloadBtn">Codex解析用JSON保存</button>
-      <button class="danger" id="clearBtn">全クリア</button>
-      <label>対応窓ms:
-        <input id="matchWindowMs" type="number" value="80" min="1" max="1000" />
-      </label>
-      <label>Jitterしきい値:
-        <input id="jitterThreshold" type="number" value="2" min="0" max="20" />
-      </label>
-      <label>推定倍率:
-        <input id="expectedRatio" type="number" value="1" min="0.1" max="10" step="0.1" />
-      </label>
-    </div>
-    <div class="hint">
-      <strong>Codex解析用JSON保存</strong>は、取得ログに加えて現在の解析サマリ、抑制候補、可視残留イベントを含めます。保存したJSONをそのままCodexへ渡すと、追加の統計確認や次のZMKパラメータ調整に使えます。
+    <div class="analysis-bar">
+      <div class="toolbar">
+        <button id="analyzeBtn">比較解析する</button>
+        <button class="secondary" id="loadSampleBtn">サンプル</button>
+        <button class="ghost" id="downloadBtn">JSON保存</button>
+        <button class="danger" id="clearBtn">クリア</button>
+      </div>
+      <div class="settings">
+        <label>対応窓ms
+          <input id="matchWindowMs" type="number" value="80" min="1" max="1000" />
+        </label>
+        <label>Jitterしきい値
+          <input id="jitterThreshold" type="number" value="2" min="0" max="20" />
+        </label>
+        <label>推定倍率
+          <input id="expectedRatio" type="number" value="1" min="0.1" max="10" step="0.1" />
+        </label>
+      </div>
     </div>
     <div class="hint">
       注意: Web SerialはChrome/Edge系で動作します。<code>file://</code>でUSB接続できない場合は、このHTMLを置いたフォルダで <code>python -m http.server 8000</code> を実行し、<code>http://localhost:8000/...</code> で開いてください。
@@ -109,7 +108,7 @@
     <h2>4. 比較グラフ</h2>
     <canvas id="chart" width="1300" height="360"></canvas>
     <div class="hint">
-      青=ZMK HID X、薄青=ZMK HID Y、黒=ブラウザ movementX、灰=movementY。赤背景は「ZMKは非ゼロだがブラウザ側がほぼゼロ」の候補です。
+      青=ZMK HID X、薄青=ZMK HID Y、黒=ブラウザ movementX、灰=movementY。rawドリフト点は赤=OS抑制候補、緑=抑制し切れず可視、橙=対応なし/不明です。
     </div>
   </section>
 
@@ -132,10 +131,6 @@
     </div>
   </section>
 
-  <section class="panel">
-    <h2>6. 推定結果とZMK実装案</h2>
-    <pre id="recommendation"></pre>
-  </section>
 </main>
 
 <script src="app.js"></script>
